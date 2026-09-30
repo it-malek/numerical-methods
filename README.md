@@ -1,20 +1,20 @@
 # numethods
 
 A small numerical methods library implementing the classical algorithms from
-**MATH 240 (Computational Mathematics)** at Lake Forest College, with full
-test coverage, convergence benchmarks, and worked examples.
+**MATH 240 (Computational Mathematics)** at Lake Forest College, with automated
+tests, convergence benchmarks, and worked examples.
 
 The package covers Taylor expansion, root-finding, finite differences,
 quadrature, ODE solvers, direct and iterative linear solvers, unconstrained
-optimization, and linear regression—every routine implemented from
+optimization, and linear regression. Each routine is implemented from
 scratch on top of NumPy, validated against SciPy / scikit-learn, and
 benchmarked to confirm the textbook convergence rates.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/it-malek/compmath.git
-cd compmath
+git clone https://github.com/it-malek/numerical-methods.git
+cd numerical-methods
 pip install -e ".[dev]"
 ```
 
@@ -107,7 +107,7 @@ See [`docs/method_reference.md`](docs/method_reference.md) for a one-page
 
 The original lab assignments come from MATH 240 (Introduction to
 Computational Mathematics) at Lake Forest College. The library and
-infrastructure here are an expanded, productionized version of that work.
+infrastructure here are an expanded version of that coursework.
 
 ## License
 
