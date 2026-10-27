@@ -8,7 +8,8 @@ recommended `numethods` routine, with a short note on when to prefer it.
 | I want to...                                       | Use                              | Notes |
 |----------------------------------------------------|----------------------------------|-------|
 | Build a Taylor polynomial around a point           | `taylor_polynomial(f, a, n, x=None, var=..., h=...)`  | Works with symbolic or numerical `f`. Returns a callable if `x` is omitted. |
-| Bound the truncation error                         | `taylor_remainder_bound(f, a, n, x, var=..., M=...)` | Uses the Lagrange remainder form. Supply a derivative bound `M` when you have one. |
+| Estimate the truncation error                      | `taylor_remainder_estimate(f, a, n, x, var=...)` | Sampled derivative maximum; may miss peaks. No bound guarantee. |
+| Bound the truncation error conditionally            | `taylor_remainder_bound(f, a, n, x, M=...)` | Requires caller-supplied derivative bound over the entire interval and Taylor smoothness assumptions. Does not certify M. |
 
 ## Root-finding (scalar)
 
@@ -35,7 +36,7 @@ recommended `numethods` routine, with a short note on when to prefer it.
 | Quick second-order quadrature                       | `trapezoid(f, a, b, n)`         | $\mathcal{O}(h^2)$. Robust. |
 | Higher-order on smooth integrands                   | `simpson(f, a, b, n)`           | $\mathcal{O}(h^4)$. `n` must be even. |
 | Best accuracy on smooth $f$ with few evaluations    | `romberg(f, a, b, max_levels)`  | Richardson on trapezoid. Often machine precision in 6–8 levels. |
-| Adaptive quadrature with a target tolerance         | `adaptive_simpson(f, a, b, tol)`| Splits where curvature is high. |
+| Adaptive quadrature with a target tolerance         | `adaptive_simpson(f, a, b, tol)`| Absolute target; computed heuristic error, convergence status, and explicit depth/spacing failure. |
 | Random / high-dimensional / discontinuous integrands| `monte_carlo(f, a, b, n_samples, rng)`  | $\mathcal{O}(n^{-1/2})$. Pass a seeded RNG for reproducibility. |
 
 ## ODEs (initial-value problems)
@@ -45,7 +46,7 @@ recommended `numethods` routine, with a short note on when to prefer it.
 | Quick first look / debugging                        | `euler(f, t_span, y0, n)`       | $\mathcal{O}(h)$. Fixed step. |
 | Fixed-step second-order                             | `midpoint(...)`                  | $\mathcal{O}(h^2)$. |
 | Fixed-step accurate solution                        | `rk4(...)`                       | $\mathcal{O}(h^4)$. The default workhorse. |
-| Adaptive step with a target tolerance               | `rk45_adaptive(f, t_span, y0, rtol, atol)` | Dormand-Prince. Good for varying time scales. Handles vector-valued `y`. |
+| Adaptive step with a target tolerance               | `rk45_adaptive(f, t_span, y0, rtol, atol)` | Dormand-Prince; forward only, finite positive controls, local RMS error test. Failures carry accepted scalar/vector trajectory. |
 
 ## Linear systems $A x = b$
 
@@ -55,7 +56,7 @@ recommended `numethods` routine, with a short note on when to prefer it.
 | Reuse a factorization for many right-hand sides     | `lu_decomposition(A)` + `lu_solve(...)` | Factor once, solve many times. |
 | Iterative on a diagonally-dominant matrix           | `jacobi(A, b)` / `gauss_seidel(A, b)` | Simple iterative; GS usually halves the iteration count. |
 | Iterative with relaxation                           | `sor(A, b, omega)`               | Tune `omega in (0, 2)` for fastest convergence. |
-| SPD system, large or sparse                         | `conjugate_gradient(A, b)`       | Converges in $\le n$ exact steps for $n \times n$ SPD $A$. |
+| SPD system, large or sparse                         | `conjugate_gradient(A, b)`       | Requires SPD, without certifying it. True residual is relative for nonzero b and absolute for zero b. Exact initial guess needs zero updates. |
 
 ## Optimization (unconstrained)
 

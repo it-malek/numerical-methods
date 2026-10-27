@@ -144,85 +144,101 @@ def rk45_adaptive(
     h0: float | None = None,
     max_steps: int = 100_000,
 ) -> ODESolution:
-    """Adaptive Runge-Kutta 4(5) (Dormand-Prince) with PI step-size control.
+    """Adaptive Dormand-Prince 5(4) with proportional step-size control.
 
-    Args:
-        f: Right-hand side ``f(t, y)``.
-        t_span: ``(t0, tf)`` with ``t0 < tf``.
-        y0: Initial state (scalar or vector).
-        rtol: Relative tolerance.
-        atol: Absolute tolerance (component-wise).
-        h0: Initial step (auto-chosen if None).
-        max_steps: Cap on accepted+rejected steps to prevent infinite loops.
+    Forward integration only: finite ``t0 < tf`` and finite positive ``h0``
+    (or None). ``y0`` is a finite scalar or nonempty vector. The RHS returns
+    the same number of components. Scalar ``rtol`` and ``atol`` must be finite
+    and positive. A step passes when the RMS of the embedded error divided
+    by ``atol + rtol*max(abs(y), abs(y_new))`` is at most one. This local
+    estimate is not a guaranteed global error bound.
 
-    Returns:
-        ODESolution with non-uniform ``t`` (the points actually accepted).
-
-    Raises:
-        ConvergenceError: If ``max_steps`` is reached.
+    ``max_steps`` is a positive integer counting accepted *and* rejected
+    attempts. Endpoint arrival on the last attempt succeeds. Nonfinite RHS,
+    stages or error arithmetic, budget exhaustion and inability to advance
+    at representable time spacing raise ``ConvergenceError`` with the accepted
+    trajectory (``success=False``). Invalid inputs raise ``ValueError``.
     """
-    if rtol <= 0 or atol <= 0:
-        raise ValueError("rtol and atol must be positive")
-    t0, tf = t_span
-    if tf <= t0:
-        raise ValueError(f"t_span must satisfy t0 < tf, got {t_span}")
-    y_arr = np.atleast_1d(np.asarray(y0, dtype=float))
-    scalar = np.asarray(y0).ndim == 0
+    for name, value in (("rtol", rtol), ("atol", atol)):
+        if not np.isscalar(value) or not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be a finite positive scalar")
+    if not isinstance(max_steps, (int, np.integer)) or isinstance(max_steps, (bool, np.bool_)) or max_steps < 1:
+        raise ValueError("max_steps must be a positive integer")
+    t0, tf = map(float, t_span)
+    if not np.isfinite(t0) or not np.isfinite(tf) or tf <= t0:
+        raise ValueError(f"t_span must have finite t0 < tf, got {t_span}")
+    y_arr = np.asarray(y0, dtype=float)
+    scalar = y_arr.ndim == 0
+    if y_arr.ndim > 1 or y_arr.size == 0 or not np.all(np.isfinite(y_arr)):
+        raise ValueError("y0 must be a finite scalar or nonempty vector")
+    y = np.atleast_1d(y_arr).copy()
     if h0 is None:
-        h0 = (tf - t0) * 0.01
-    h = float(h0)
-    t = float(t0)
-    y = y_arr.copy()
-    ts = [t]
-    ys = [y.copy()]
+        # Scaling endpoints first avoids overflow in tf-t0 on wide intervals.
+        h0 = max(tf * 0.01 - t0 * 0.01, float(np.nextafter(t0, tf) - t0))
+    if not np.isscalar(h0) or not np.isfinite(h0) or h0 <= 0:
+        raise ValueError("h0 must be finite and positive")
+    h, t = float(h0), t0
+    ts, ys = [t], [y.copy()]
     n_eval = 0
+
+    def solution(success):
+        Y = np.asarray(ys)
+        return ODESolution(np.asarray(ts), Y[:, 0] if scalar else Y,
+                           n_eval, "rk45_adaptive", success)
+
+    def failure(reason):
+        return ConvergenceError(f"rk45_adaptive: {reason}", result=solution(False))
+
+    def evaluate(time, state):
+        nonlocal n_eval
+        if not np.all(np.isfinite(state)) or not np.isfinite(time):
+            raise failure("nonfinite stage")
+        n_eval += 1
+        value = np.asarray(f(time, state if not scalar else state[0]), dtype=float).reshape(-1)
+        if value.size != y.size:
+            raise ValueError("RHS output size must match y0")
+        if not np.all(np.isfinite(value)):
+            raise failure("nonfinite RHS output")
+        return value
+
     for _ in range(max_steps):
-        if t >= tf:
-            break
-        if t + h > tf:
-            h = tf - t
-        # Compute the 7 RK stages.
-        k = np.zeros((7, y.size))
-        k[0] = np.asarray(f(t, y if not scalar else y[0]), dtype=float).reshape(-1)
-        for s in range(1, 7):
-            yi = y + h * sum(_DP_A[s][j] * k[j] for j in range(s))
-            k[s] = np.asarray(
-                f(t + _DP_C[s] * h, yi if not scalar else yi[0]), dtype=float
-            ).reshape(-1)
-        n_eval += 7
-        y_new = y + h * (_DP_B5 @ k)
-        # Local error estimate: |y5 - y4| approximated by E.K coefficients.
-        err_vec = h * (_DP_E @ k)
-        sc = atol + rtol * np.maximum(np.abs(y), np.abs(y_new))
-        err = float(np.sqrt(np.mean((err_vec / sc) ** 2)))
-        if err <= 1.0 or h <= 1e-14:
-            t += h
-            y = y_new
+        # Time resolution depends on t. Never force-accept a rejected step.
+        spacing = float(np.nextafter(t, tf) - t)
+        h = min(h, tf - t)
+        if h < spacing or t + h <= t:
+            raise failure("step-size underflow at representable time spacing")
+        t_new = min(t + h, tf)
+        h = t_new - t  # Tableau and error estimate use the actual time advance.
+        try:
+            with np.errstate(over="raise", invalid="raise", divide="raise"):
+                k = np.zeros((7, y.size))
+                k[0] = evaluate(t, y)
+                for stage in range(1, 7):
+                    yi = y + h * sum(_DP_A[stage][j] * k[j] for j in range(stage))
+                    k[stage] = evaluate(t + _DP_C[stage] * h, yi)
+                y_new = y + h * (_DP_B5 @ k)
+                err_vec = h * (_DP_E @ k)
+                sc = atol + rtol * np.maximum(np.abs(y), np.abs(y_new))
+                # Stable RMS avoids squaring very large or tiny ratios.
+                err = float(np.hypot.reduce(err_vec / sc) / np.sqrt(y.size))
+                if not np.all(np.isfinite(y_new)) or not np.isfinite(err):
+                    raise failure("nonfinite state or error estimate")
+        except (FloatingPointError, OverflowError) as exc:
+            raise failure("nonfinite RHS, stage or error arithmetic") from exc
+        if err <= 1.0:
+            t, y = t_new, y_new
             ts.append(t)
             ys.append(y.copy())
-        # Step-size update with safety factor; clamp to [0.1, 5] x h.
-        if err == 0:
-            factor = 5.0
-        else:
-            factor = 0.9 * err ** (-0.2)
-            factor = min(5.0, max(0.1, factor))
+            if t == tf:
+                return solution(True)
+        factor = 5.0 if err == 0 else min(5.0, max(0.1, 0.9 * err ** (-0.2)))
         h *= factor
-    else:
-        raise ConvergenceError(
-            f"rk45_adaptive: did not reach tf in {max_steps} steps",
-            result=ODESolution(
-                t=np.asarray(ts),
-                y=(np.asarray(ys)[:, 0] if scalar else np.asarray(ys)),
-                n_evaluations=n_eval,
-                method="rk45_adaptive",
-                success=False,
-            ),
-        )
-    Y = np.asarray(ys)
-    return ODESolution(
-        t=np.asarray(ts),
-        y=(Y[:, 0] if scalar else Y),
-        n_evaluations=n_eval,
-        method="rk45_adaptive",
-        success=True,
-    )
+        if err > 1.0:
+            # Multiplication may shrink h without changing its rounded
+            # endpoint. A rejected attempt must make representable progress
+            # toward a smaller step, or report that none is available.
+            if t + h >= t_new:
+                h = float(np.nextafter(t_new, t) - t)
+            if h < spacing or t + h <= t:
+                raise failure("step-size underflow: error control needs a smaller step")
+    raise failure(f"did not reach tf in {max_steps} steps")

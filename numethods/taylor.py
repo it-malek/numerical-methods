@@ -110,6 +110,13 @@ def taylor_polynomial(
     return poly(x) if x is not None else poly
 
 
+def _validate_remainder_inputs(a: float, n: int, x: float) -> None:
+    if not isinstance(n, (int, np.integer)) or isinstance(n, (bool, np.bool_)) or n < 0:
+        raise ValueError("degree n must be a non-negative integer")
+    if not np.isfinite(a) or not np.isfinite(x):
+        raise ValueError("a and x must be finite")
+
+
 def taylor_remainder_bound(
     f: ScalarFunc | sp.Expr,
     a: float,
@@ -119,50 +126,59 @@ def taylor_remainder_bound(
     var: sp.Symbol | None = None,
     M: float | None = None,
 ) -> float:
-    """Lagrange remainder bound ``|R_n(x)| <= M |x-a|^{n+1} / (n+1)!``.
+    """Conditional Lagrange bound ``M*abs(x-a)**(n+1)/(n+1)!``.
 
-    Args:
-        f: Function (callable or SymPy expression).
-        a: Expansion point.
-        n: Polynomial degree.
-        x: Evaluation point.
-        var: SymPy variable (for symbolic ``f``).
-        M: A user-supplied bound on ``|f^{(n+1)}(xi)|`` over the interval
-            between ``a`` and ``x``. If ``None`` and ``f`` is symbolic,
-            this is computed by sampling the symbolic ``(n+1)``-th
-            derivative on a grid; otherwise a finite-difference estimate
-            is used.
+    The caller must supply finite nonnegative ``M`` bounding ``abs(f^(n+1))``
+    on the *entire* closed interval between ``a`` and ``x``, and f must have
+    the derivatives required by Taylor's theorem there. Neither assumption
+    is certified by this program; ``f`` and ``var`` are retained for call
+    compatibility, but are not evaluated.
 
-    Returns:
-        A non-negative upper bound on the truncation error.
+    Compatibility: calls omitting ``M`` now raise ``ValueError``. Use
+    :func:`taylor_remainder_estimate` for the former sampled heuristic.
+    The return type remains float; no numerical guarantee is implied when
+    a caller's M is invalid or the polynomial uses approximate derivatives.
     """
-    if n < 0:
-        raise ValueError(f"degree n must be >= 0, got {n}")
-
+    _validate_remainder_inputs(a, n, x)
     if M is None:
-        if isinstance(f, sp.Expr):
-            if var is None:
-                free = list(f.free_symbols)
-                if len(free) != 1:
-                    raise ValueError(
-                        "SymPy expression has multiple free symbols; pass var= explicitly"
-                    )
-                var = free[0]
-            deriv = sp.diff(f, var, n + 1)
-            deriv_fn = sp.lambdify(var, deriv, modules="numpy")
-            # Probe densely over the interval to estimate the sup.
-            lo, hi = (a, x) if a <= x else (x, a)
-            grid = np.linspace(lo, hi, 257)
-            vals = np.abs(deriv_fn(grid))
-            M = float(np.nanmax(vals))
-        else:
-            # Numerical fallback: sample the (n+1)-th derivative.
-            lo, hi = (a, x) if a <= x else (x, a)
-            grid = np.linspace(lo, hi, 33)
-            h = max(1e-3, np.cbrt(np.finfo(float).eps))
-            vals = [
-                abs(_numerical_nth_derivative(f, g, n + 1, h)) for g in grid
-            ]
-            M = float(np.max(vals))
+        raise ValueError("supply a derivative bound M, or use taylor_remainder_estimate")
+    if not np.isfinite(M) or M < 0:
+        raise ValueError("M must be finite and nonnegative")
+    return float(M * abs(x - a) ** (n + 1) / factorial(n + 1))
 
-    return M * abs(x - a) ** (n + 1) / factorial(n + 1)
+
+def taylor_remainder_estimate(
+    f: ScalarFunc | sp.Expr,
+    a: float,
+    n: int,
+    x: float,
+    *,
+    var: sp.Symbol | None = None,
+) -> float:
+    """Sampled Lagrange-form remainder estimate, **not a bound**.
+
+    Symbolic derivatives are sampled at 257 equally spaced nodes. Callable
+    derivatives use central finite differences (h=1e-3) at 33 nodes, adding
+    differentiation error and sampling outside the interval near endpoints.
+    Finite sampling can miss arbitrarily narrow peaks. Even zero is not a
+    certificate of zero error. High numerical derivative orders are noisy.
+    Reversed intervals are supported. Nonfinite samples raise ValueError.
+    """
+    _validate_remainder_inputs(a, n, x)
+    lo, hi = min(a, x), max(a, x)
+    if isinstance(f, sp.Expr):
+        if var is None:
+            free = list(f.free_symbols)
+            if len(free) != 1:
+                raise ValueError("SymPy expression has multiple free symbols; pass var= explicitly")
+            var = free[0]
+        deriv_fn = sp.lambdify(var, sp.diff(f, var, n + 1), modules="numpy")
+        vals = np.abs(deriv_fn(np.linspace(lo, hi, 257)))
+    else:
+        grid = np.linspace(lo, hi, 33)
+        h = max(1e-3, np.cbrt(np.finfo(float).eps))
+        vals = np.abs([_numerical_nth_derivative(f, g, n + 1, h) for g in grid])
+    if not np.all(np.isfinite(vals)):
+        raise ValueError("derivative samples must be finite")
+    M = float(np.max(vals))
+    return float(M * abs(x - a) ** (n + 1) / factorial(n + 1))

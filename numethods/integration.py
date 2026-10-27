@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ._utils import ConvergenceError, validate_tol
+
 
 @dataclass
 class IntegrationResult:
@@ -18,6 +20,9 @@ class IntegrationResult:
         error_estimate: Approximate error if available, else None.
         method: Name of the rule used.
         history: For iterative/adaptive rules, the per-step value sequence.
+        converged: Adaptive Simpson's local tests all passed; None for other rules.
+        requested_tolerance: Adaptive Simpson's requested absolute tolerance,
+            distinct from its heuristic error_estimate; None for other rules.
     """
 
     value: float
@@ -25,6 +30,8 @@ class IntegrationResult:
     error_estimate: float | None = None
     method: str = ""
     history: list[float] = field(default_factory=list)
+    converged: bool | None = None
+    requested_tolerance: float | None = None
 
 
 def trapezoid(
@@ -171,24 +178,35 @@ def _adaptive_simpson_recurse(
     depth: int,
     counter: list[int],
     max_depth: int,
-) -> float:
+) -> tuple[float, float, bool]:
     """Recursive worker for adaptive Simpson - splits if refined estimate disagrees."""
-    m = 0.5 * (a + b)
-    lm = 0.5 * (a + m)
-    rm = 0.5 * (m + b)
-    flm = float(f(np.array([lm]))[0])
-    frm = float(f(np.array([rm]))[0])
+    m = 0.5 * a + 0.5 * b
+    lm = 0.5 * a + 0.5 * m
+    rm = 0.5 * m + 0.5 * b
+    if lm in (a, m) or rm in (m, b):
+        return whole, float("inf"), False  # No representable refinement remains.
+    flm = f(lm)
+    frm = f(rm)
     counter[0] += 2
     left = _simpson_one(f, a, m, fa, fm, flm)
     right = _simpson_one(f, m, b, fm, fb, frm)
     diff = left + right - whole
-    if depth >= max_depth or abs(diff) <= 15.0 * tol:
-        return left + right + diff / 15.0
-    return _adaptive_simpson_recurse(
+    if not all(np.isfinite(v) for v in (left, right, diff)):
+        raise ConvergenceError("adaptive_simpson: nonfinite quadrature arithmetic")
+    # For smooth f in the fourth-order regime, refinement divides the
+    # leading Simpson error by 16. The difference estimates 15 times that error.
+    error = abs(diff) / 15.0
+    if error <= tol:
+        return left + right + diff / 15.0, error, True
+    if depth >= max_depth:
+        return left + right + diff / 15.0, error, False
+    lv, le, lc = _adaptive_simpson_recurse(
         f, a, m, fa, fm, flm, left, tol / 2.0, depth + 1, counter, max_depth
-    ) + _adaptive_simpson_recurse(
+    )
+    rv, re, rc = _adaptive_simpson_recurse(
         f, m, b, fm, fb, frm, right, tol / 2.0, depth + 1, counter, max_depth
     )
+    return lv + rv, le + re, lc and rc
 
 
 def adaptive_simpson(
@@ -198,33 +216,55 @@ def adaptive_simpson(
     tol: float = 1e-8,
     max_depth: int = 20,
 ) -> IntegrationResult:
-    """Adaptive Simpson's rule with recursive bisection.
+    """Adaptive Simpson quadrature with an absolute error *target* ``tol``.
 
-    Subdivides until the local Richardson error estimate falls below ``tol``,
-    or ``max_depth`` recursion levels are reached.
+    Accept leaves with ``abs(S_two - S_one)/15 <= local_tol``; halve the
+    tolerance at each split and sum leaf estimates. The corrected integral
+    uses Richardson extrapolation. The estimate describes the uncorrected
+    refined Simpson rule; it is neither an achieved error nor a rigorous bound
+    on the returned value. Smoothness and resolved variation are assumed;
+    sampling may miss narrow peaks or oscillations entirely.
 
-    Args:
-        f: Integrand (vectorized).
-        a: Lower limit.
-        b: Upper limit.
-        tol: Local tolerance.
-        max_depth: Maximum recursion depth per branch.
+    Supports finite reversed and zero-length intervals. ``f`` takes a length-1
+    NumPy array and returns one finite value. ``max_depth`` is a positive
+    integer; root depth is zero. Depth/spacing exhaustion raises
+    ``ConvergenceError`` with a nonconverged ``IntegrationResult`` for the
+    entire interval. Nonfinite evaluations/arithmetic raise ``ConvergenceError``
+    with no result (no valid interval-wide estimate is available).
     """
-    if tol <= 0:
-        raise ValueError(f"tol must be positive, got {tol}")
-    if max_depth < 1:
-        raise ValueError(f"max_depth must be >= 1, got {max_depth}")
-    fa = float(f(np.array([a]))[0])
-    fb = float(f(np.array([b]))[0])
-    fm = float(f(np.array([0.5 * (a + b)]))[0])
-    counter = [3]  # endpoints + midpoint
-    whole = _simpson_one(f, a, b, fa, fb, fm)
-    val = _adaptive_simpson_recurse(
-        f, a, b, fa, fb, fm, whole, tol, 0, counter, max_depth
-    )
-    return IntegrationResult(
-        value=float(val),
-        n_evaluations=counter[0],
-        error_estimate=tol,
-        method="adaptive_simpson",
-    )
+    validate_tol(tol)
+    if not isinstance(max_depth, (int, np.integer)) or isinstance(max_depth, (bool, np.bool_)) or max_depth < 1:
+        raise ValueError("max_depth must be a positive integer")
+    if not np.isfinite(a) or not np.isfinite(b):
+        raise ValueError("interval endpoints must be finite")
+    if a == b:
+        return IntegrationResult(0.0, 0, 0.0, "adaptive_simpson",
+                                 converged=True, requested_tolerance=tol)
+
+    def evaluate(t):
+        values = np.asarray(f(np.array([t])), dtype=float)
+        if values.shape != (1,):
+            raise ValueError("f must return a length-1 array for a length-1 input")
+        if not np.isfinite(values[0]):
+            raise ConvergenceError("adaptive_simpson: nonfinite integrand evaluation")
+        return float(values[0])
+
+    counter = [3]
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            fa, fb, fm = evaluate(a), evaluate(b), evaluate(0.5 * a + 0.5 * b)
+            whole = _simpson_one(f, a, b, fa, fb, fm)
+            if not np.isfinite(whole):
+                raise ConvergenceError("adaptive_simpson: nonfinite quadrature arithmetic")
+            val, error, converged = _adaptive_simpson_recurse(
+                evaluate, a, b, fa, fb, fm, whole, tol, 0, counter, max_depth
+            )
+            if not np.isfinite(val) or (not np.isfinite(error) and converged):
+                raise ConvergenceError("adaptive_simpson: nonfinite quadrature arithmetic")
+    except (FloatingPointError, OverflowError) as exc:
+        raise ConvergenceError("adaptive_simpson: nonfinite evaluation or arithmetic") from exc
+    result = IntegrationResult(float(val), counter[0], float(error), "adaptive_simpson",
+                               converged=converged, requested_tolerance=tol)
+    if not converged:
+        raise ConvergenceError("adaptive_simpson: depth limit or representable spacing exhausted", result=result)
+    return result

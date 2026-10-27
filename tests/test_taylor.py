@@ -64,12 +64,12 @@ class TestTaylorRemainder:
             for xv in [0.2, 0.4, 0.6]:
                 approx = taylor_polynomial(sp.sin(x), 0.0, n, xv)
                 actual_err = abs(math.sin(xv) - approx)
-                bound = taylor_remainder_bound(sp.sin(x), 0.0, n, xv)
+                bound = taylor_remainder_bound(sp.sin(x), 0.0, n, xv, M=1.0)
                 assert actual_err <= bound + 1e-15
 
     def test_zero_at_expansion_point(self):
         x = sp.Symbol("x")
-        assert taylor_remainder_bound(sp.cos(x), 1.0, 4, 1.0) == pytest.approx(0.0)
+        assert taylor_remainder_bound(sp.cos(x), 1.0, 4, 1.0, M=1.0) == pytest.approx(0.0)
 
     def test_user_supplied_M(self):
         # M=1 for sin; |R_3(x)| <= |x|^4 / 24

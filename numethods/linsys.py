@@ -21,8 +21,8 @@ class IterativeSolveResult:
     Attributes:
         x: Best estimate of the solution.
         iterations: Number of sweeps performed.
-        converged: Whether ``||Ax - b|| / ||b|| < tol`` was achieved.
-        residual_norm: Final relative residual norm.
+        converged: Whether the solver's residual test was achieved.
+        residual_norm: Final relative residual norm; absolute when b is zero.
         history: Per-iteration residual norms (for log-log convergence plots).
         method: Algorithm name.
     """
@@ -238,34 +238,78 @@ def conjugate_gradient(
     tol: float = 1e-10,
     max_iter: int | None = None,
 ) -> IterativeSolveResult:
-    """Conjugate-gradient method for symmetric positive-definite systems.
+    """Conjugate gradient for a real symmetric positive-definite (SPD) system.
 
-    Defaults ``max_iter`` to ``n`` (CG converges in at most ``n`` exact-arithmetic
-    steps for an ``n x n`` system).
+    The caller supplies SPD ``A``; symmetry/definiteness are not certified.
+    Stop when the *true* residual ``||b-Ax|| / ||b|| < tol``. For zero ``b``,
+    use the absolute residual instead. An adequate initial guess returns zero
+    iterations and an empty history; otherwise history has one entry per update.
+
+    Defaults ``max_iter`` to ``n`` (the exact-arithmetic termination bound,
+    not a floating-point guarantee). Invalid inputs raise ``ValueError``;
+    nonfinite arithmetic, nonpositive curvature or exhausted iterations raise
+    ``ConvergenceError`` carrying the last completed iterate.
     """
     validate_tol(tol)
-    A, b, x, bnorm = _iterative_setup(A, b, x0)
-    n = A.shape[0]
+    A = _validate_square(A)
+    b = _validate_b(A, b)
+    x = np.zeros(b.size) if x0 is None else np.asarray(x0, dtype=float).ravel().copy()
+    if x.size != b.size:
+        raise ValueError("x0 length must match the system dimension")
+    if not all(np.all(np.isfinite(v)) for v in (A, b, x)):
+        raise ValueError("A, b and x0 must be finite")
     if max_iter is None:
-        max_iter = n
+        max_iter = b.size
     validate_max_iter(max_iter)
-    r = b - A @ x
-    p = r.copy()
-    rs_old = float(r @ r)
     history: list[float] = []
-    for k in range(1, max_iter + 1):
-        Ap = A @ p
-        alpha = rs_old / float(p @ Ap)
-        x = x + alpha * p
-        r = r - alpha * Ap
-        rs_new = float(r @ r)
-        res = float(np.sqrt(rs_new) / bnorm)
-        history.append(res)
-        if res < tol:
-            return IterativeSolveResult(x, k, True, res, history, "conjugate_gradient")
-        p = r + (rs_new / rs_old) * p
-        rs_old = rs_new
-    raise ConvergenceError(
-        f"conjugate_gradient did not converge in {max_iter} iterations (rel. residual {res:.3e})",
-        result=IterativeSolveResult(x, max_iter, False, res, history, "conjugate_gradient"),
-    )
+    res = float("inf")
+
+    def failure(reason):
+        return ConvergenceError(
+            f"conjugate_gradient: {reason}",
+            result=IterativeSolveResult(x.copy(), len(history), False, res,
+                                        history.copy(), "conjugate_gradient"),
+        )
+
+    # hypot avoids squaring tiny/large entries just to measure a norm.
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            bnorm = float(np.hypot.reduce(b)) or 1.0
+            r = b - A @ x
+            res = float(np.hypot.reduce(r) / bnorm)
+            if not np.isfinite(res):
+                raise failure("nonfinite initial residual")
+            if res < tol:
+                return IterativeSolveResult(x, 0, True, res, [], "conjugate_gradient")
+            p = r.copy()
+            rs_old = float(r @ r)
+            for _ in range(max_iter):
+                Ap = A @ p
+                curvature = float(p @ Ap)
+                if not np.isfinite(curvature) or not np.isfinite(rs_old):
+                    raise failure("nonfinite curvature or residual product")
+                if curvature <= 0:
+                    raise failure("nonpositive curvature; SPD iteration broke down")
+                if rs_old <= 0:
+                    raise failure("residual product underflow; iteration broke down")
+                alpha = rs_old / curvature
+                x_new = x + alpha * p
+                r_new = r - alpha * Ap
+                # Recurrence residuals can drift: report and test b-Ax itself.
+                res_new = float(np.hypot.reduce(b - A @ x_new) / bnorm)
+                if not (np.all(np.isfinite(x_new)) and np.all(np.isfinite(r_new))
+                        and np.isfinite(res_new)):
+                    raise failure("nonfinite iterate or residual")
+                x, r, res = x_new, r_new, res_new
+                history.append(res)
+                if res < tol:
+                    return IterativeSolveResult(x, len(history), True, res, history,
+                                                "conjugate_gradient")
+                rs_new = float(r @ r)
+                if not np.isfinite(rs_new):
+                    raise failure("nonfinite residual product")
+                p = r + (rs_new / rs_old) * p
+                rs_old = rs_new
+    except (FloatingPointError, OverflowError) as exc:
+        raise failure("nonfinite arithmetic during iteration") from exc
+    raise failure(f"did not converge in {max_iter} iterations (residual {res:.3e})")

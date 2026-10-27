@@ -12,7 +12,7 @@ import numpy as np
 
 
 class ConvergenceError(RuntimeError):
-    """Raised when an iterative method fails to converge in ``max_iter`` steps.
+    """Raised on convergence failure, numerical breakdown or exhausted resources.
 
     The partial result is exposed via the :attr:`result` attribute so users
     can inspect what went wrong (e.g. the last iterate, the residual history).

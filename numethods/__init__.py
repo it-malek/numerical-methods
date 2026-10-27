@@ -26,6 +26,7 @@ _LAZY_IMPORTS = {
     # taylor
     "taylor_polynomial": "numethods.taylor",
     "taylor_remainder_bound": "numethods.taylor",
+    "taylor_remainder_estimate": "numethods.taylor",
     # rootfinding
     "RootResult": "numethods.rootfinding",
     "bisection": "numethods.rootfinding",
